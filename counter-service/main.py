@@ -98,32 +98,26 @@ def process_transaction(iou: MinifiedIOU):
         if not verify_signature(expanded_iou):
             expanded_iou["status"] = "REJECTED"
             expanded_iou["reason"] = "Invalid signature"
-            requests.post(f"{CENTRAL_LEDGER_URL}/ledger/transactions", json=expanded_iou)
+            append_transaction(expanded_iou)
             return {"message": "Transaction rejected", "reason": "Invalid signature"}
 
         # Check for duplicate transaction ID
         if check_duplicate_tx(expanded_iou["tx_id"]):
             expanded_iou["status"] = "REJECTED"
             expanded_iou["reason"] = "Duplicate transaction"
-            requests.post(f"{CENTRAL_LEDGER_URL}/ledger/transactions", json=expanded_iou)
+            append_transaction(expanded_iou)
             return {"message": "Transaction rejected", "reason": "Duplicate transaction"}
 
         # Check for sufficient balance
         if not check_sufficient_balance(expanded_iou["sender_id"], expanded_iou["amount"]):
             expanded_iou["status"] = "REJECTED"
             expanded_iou["reason"] = "Insufficient balance"
-            requests.post(f"{CENTRAL_LEDGER_URL}/ledger/transactions", json=expanded_iou)
+            append_transaction(expanded_iou)
             return {"message": "Transaction rejected", "reason": "Insufficient balance"}
 
         # Fetch sender and receiver details
-        sender_response = requests.get(f"{CENTRAL_LEDGER_URL}/ledger/users/{expanded_iou['sender_id']}")
-        receiver_response = requests.get(f"{CENTRAL_LEDGER_URL}/ledger/users/{expanded_iou['receiver_id']}")
-
-        if sender_response.status_code != 200 or receiver_response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Central ledger service error")
-
-        sender_info = sender_response.json()
-        receiver_info = receiver_response.json()
+        sender_info = get_user(expanded_iou["sender_id"])
+        receiver_info = get_user(expanded_iou["receiver_id"])
 
         # Build fraud JSON
         fraud_payload = {
@@ -139,16 +133,23 @@ def process_transaction(iou: MinifiedIOU):
             raise HTTPException(status_code=500, detail="Fraud model service error")
 
         fraud_result = fraud_response.json()
-        expanded_iou["status"] = fraud_result.get("status", "REJECTED")
+        fraud_status = fraud_result.get("status", "REJECTED")
         expanded_iou["reason"] = fraud_result.get("reason", "Fraud model error")
 
-        # Send final result to central ledger
-        expanded_iou["source"] = "FRAUD_MODEL"
-        ledger_response = requests.post(f"{CENTRAL_LEDGER_URL}/ledger/transactions", json=expanded_iou)
-        if ledger_response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Central ledger service error")
+        if fraud_status == "ACCEPTED":
+            expanded_iou["status"] = "APPROVED"
+            # Update balances
+            sender_info["current_balance"] -= expanded_iou["amount"]
+            receiver_info["current_balance"] += expanded_iou["amount"]
+        elif fraud_status == "OTP_PENDING":
+            expanded_iou["status"] = "OTP_PENDING"
+        else:
+            expanded_iou["status"] = "REJECTED"
 
-        return {"message": "Transaction processed successfully", "ledger_response": ledger_response.json()}
+        # Write transaction to central ledger
+        append_transaction(expanded_iou)
+
+        return {"message": "Transaction processed successfully", "status": expanded_iou["status"], "reason": expanded_iou["reason"]}
 
     except ValidationError as e:
         raise HTTPException(status_code=400, detail="Invalid transaction payload")
