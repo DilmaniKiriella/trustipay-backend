@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  counter-service:
+    build: ./counter-service
+    ports:
+      - "8001:8001"
+    networks:
+      - trustipay-network
+
+  central-ledger-service:
+    build: ./central-ledger-service
+    ports:
+      - "8002:8002"
+    networks:
+      - trustipay-network
+
+networks:
+  trustipay-network:
+    driver: bridge
